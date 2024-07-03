@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+#
+# Simple utility script to support finding and replacing placeholders within
+# Terraform source files
+#
+
+##############################################################################
+# Shell Behaviour
+##############################################################################
+
+# Check for unbound variables being used
+# set -o nounset
+
+# Exit is a bad command is attempted. If you're going to handle errors then
+# leave this disabled
+# set -o errexit
+
+# Exit if any of the commands in a pipeline exit with a non-zero exit code
+# set -o pipefail
+
+##############################################################################
+# Variables
+##############################################################################
+
+CONST_COMMAND_LINE="$@"
+CONST_OS_VERSION=$(uname -r)
+CONST_SYSTEM_TYPE=$(uname -m)
+CONST_SCRIPT_NAME=${0##*/}
+
+# Defining True and False to improve readability in scripts
+TRUE=0
+FALSE=1
+
+# Current logging config
+TTY_OUTPUT_ENABLED=$TRUE
+LOG_OUTPUT_ENABLED=$FALSE
+SYSLOG_OUTPUT_ENABLED=$FALSE
+export TTY_OUTPUT_ENABLED LOG_OUTPUT_ENABLED SYSLOG_OUTPUT_ENABLED
+
+# Trap  abnormal termination
+trap cleanup 1 2 3 15
+
+
+##############################################################################
+# Functions
+##############################################################################
+
+function show_usage {
+    cat <<EOF
+
+usage: $CONST_SCRIPT_NAME <manifest.ini> <env-id> [<path>]
+
+Simple utility script to support finding and replacing placeholders within
+Terraform source files by loading a series of environments from an INI format
+file and replacing the listed module versions matching the specified <env-id>.
+If <path> is not provided it will default to the current directory.
+
+Replacements are performed using an approach that will allow the code to be
+written as OpenTofu 1.8 compatible code and support making changes for previous
+OpenTofu versions and Hashicorp Terraform
+
+If the INI file contains the following;
+
+  [development]
+  # Hestio worX modules
+  worx_encryption_key = "2.2.5"
+  worx_managed_object_storage = "2.0.3"
+  worx_secret_management = "2.1.0"
+  worx_stateful_vm = "0.3.0"
+
+Searches for:
+
+  local . basename(<manifest.ini>) . <env-id> . worx_encryption_key
+  local . basename(<manifest.ini>) . <env-id> . worx_managed_object_storage
+  local . basename(<manifest.ini>) . <env-id> . worx_secret_management
+  local . basename(<manifest.ini>) . <env-id> . worx_stateful_vm
+
+Replaces each with the corresponding value in the INI file.
+
+  local.manifest.development.worx_encryption_key         => "2.2.5"
+  local.manifest.development.worx_managed_object_storage => "2.0.3"
+  local.manifest.development.worx_secret_management      => "2.1.0"
+  local.manifest.development.worx_stateful_vm            => "0.3.0"
+
+Allowing the code
+
+  module "worx_stateful_vm" {
+    source             = "registry.cloud.hest.io/W100/worx_encryption_key/aws"
+    version            = local.tf_module_versions_by_env.development.worx_encryption_key
+    configuration_file = "./example.yml"
+  }
+
+To become
+
+  module "worx_stateful_vm" {
+    source             = "registry.cloud.hest.io/W100/worx_encryption_key/aws"
+    version            = "2.2.5"
+    configuration_file = "./example.yml"
+  }
+
+EOF
+
+}
+
+
+function cleanup {
+  echo "Exiting."
+  exit 1
+}
+
+
+# Taken from Hestio AWSH https://github.com/hest-io/awsh
+# Use as _config_ini_parser "path/sample.ini". Once loaded the section names are available
+# from the $_ini_cfg_sections variable
+function _config_ini_parser {
+    fixed_file=$(cat "$1" | grep -v -e "^$" -e"^ *#" -e "^#" | sed -r -e 's/(\S*)(\s*)=(\s*)(.*)/\1=\4/g' ) # fix spaces either side of the '='
+    # shellcheck disable=SC2206
+    IFS=$'\n' && ini=( $fixed_file )         # convert to line-array
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]//;*/} )                   # remove ';' comments
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]//\#*/} )                  # remove '#' comments
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/#[/\}$'\n'cfg.section.} ) # set section prefix
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/%]/ \(} )                 # convert text2function (1)
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/=/=\( } )                 # convert item to array
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/%/ \)} )                  # close array parenthesis
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/%\( \)/\(\) \{} )         # convert text2function (2)
+    # shellcheck disable=SC2206
+    ini=( ${ini[*]/%\} \)/\}} )              # remove extra parenthesis
+    ini[0]=''                                # remove first element
+    ini[${#ini[*]} + 1]='}'                  # add the last brace
+    eval "$(echo "${ini[*]}")"               # eval the result to load and import the content
+    # Now build a list of section names and expose it as _ini_cfg_get_sections
+    _ini_cfg_sections="$(echo "${ini[*]}" | grep -oE '^cfg\.section.*\(' | sed -e 's/\ (//g' | sed -e 's/ /_/g')"
+    export _ini_cfg_sections
+}
+
+
+# Taken from Hestio AWSH https://github.com/hest-io/awsh
+# A logging function which can be used as follows
+# _log "$LINENO" "Example test message"
+function _log {
+
+    local p_line_number="$1"
+    local p_message="$2"
+    : "${p_line_number:=0}"
+    : "${DEFAULT_OUT:=/dev/stderr}"
+
+    timestamp="$(date +'%Y-%m-%dT%H:%M:%S%z')"
+    log_file_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "$p_message")
+    log_tty_msg=$(printf "[%s]: %-s:%04d : INFO  %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "$p_message")
+
+    # Output to TTY if enabled
+    [[ $TTY_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_tty_msg}" >&2
+    # Output to the DEFAULT_OUT file if enabled
+    [[ $LOG_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_file_msg}" >> "$DEFAULT_OUT"
+    # Output to the syslog if the logger command is found
+    _dummy=$(command -v logger > /dev/null 2>&1)
+    has_syslogger=$?
+    [[ $SYSLOG_OUTPUT_ENABLED -eq $TRUE ]] && [[ "$has_syslogger" -eq $TRUE ]] && logger -t "$CONST_SCRIPT_NAME" -p user.info "${log_tty_msg}"
+
+}
+
+
+# Taken from Hestio AWSH https://github.com/hest-io/awsh
+# A logging function which can be used as follows to exit the run with a specific error message
+# _log_exit_with_error "$LINENO" "Example test message"
+function _log_exit_with_error {
+
+  # ANSI escape code for red text
+  local red='\033[0;31m'
+  # ANSI escape code to reset text color
+  local reset='\033[0m'
+
+  local p_line_number="$1"
+  local p_message="$2"
+  : "${p_line_number:=0}"
+  : "${DEFAULT_OUT:=/dev/stderr}"
+
+  timestamp="$(date +'%Y-%m-%dT%H:%M:%S%z')"
+  log_file_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "${p_message}")
+  log_tty_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "${red}ERROR ${p_message}${reset}")
+
+  # Output to TTY if enabled
+  [[ $TTY_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_tty_msg}" >&2
+  # Output to the DEFAULT_OUT file if enabled
+  [[ $LOG_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_file_msg}" >> "$DEFAULT_OUT"
+  # Output to the syslog if the logger command is found
+  _dummy=$(command -v logger > /dev/null 2>&1)
+  has_syslogger=$?
+  [[ $SYSLOG_OUTPUT_ENABLED -eq $TRUE ]] && [[ "$has_syslogger" -eq $TRUE ]] && logger -t "$CONST_SCRIPT_NAME" -p user.info "${log_tty_msg}"
+
+  exit 1
+
+}
+
+
+function _trim {
+  awk '{$1=$1};1'
+}
+
+
+
+##############################################################################
+# Main loop
+##############################################################################
+
+
+# show help for no arguments if stdin is a terminal
+if [ "$1" == '-h' ] || [ "$1" == '--help' ] || [ "$1" == 'help' ]; then
+    show_usage
+    exit 0
+fi
+
+# if less than two arguments were provided show usage
+if [ $# -lt 2 ]; then
+    show_usage
+    exit 1
+fi
+
+INI_FILE="${1}"
+INI_SECTION="${2}"
+SOURCE_PATH="${3:-.}"
+
+# Ensure the specified file exists
+[ -f "${INI_FILE}" ] || _log_exit_with_error $LINENO "Specified INI file not found: ${INI_FILE}"
+
+# Load the INI file and validate that the specified env-id is present
+_config_ini_parser "${INI_FILE}"
+
+echo "$_ini_cfg_sections" | grep -q "${INI_SECTION}"
+[ $? -eq 0 ] || _log_exit_with_error $LINENO "Specified section ${INI_SECTION} not found in: ${INI_FILE}"
+
+# Load the section keys and values into the environment
+eval "cfg.section.${INI_SECTION}"
+
+# Extract the keys for each of our values
+KEYS=$(type "cfg.section.${INI_SECTION}" | sed -e '1,3d; $d' | cut -d'=' -f1 | _trim)
+
+# Now process all *.tf files in the specified path, replacing the pre OpenTofu v1.8
+# definitions with the actual values
+INI_FILE_NAME="$(basename "${INI_FILE}")"
+PREFIX="local.${INI_FILE_NAME%%.ini}.${INI_SECTION}"
+
+_log $LINENO "Processing *.tf in ${SOURCE_PATH}"
+
+for tf_file in ${SOURCE_PATH}/*.tf; do
+
+  # Only process files that contain matches
+  if grep -q "${PREFIX}" "${tf_file}"; then
+
+    _log $LINENO "Processing $(basename "${tf_file}")"
+
+    for ini_key in ${KEYS}; do
+      computed_value="$(eval "echo \$${ini_key}")"
+      _log $LINENO "Replacing ${PREFIX}.${ini_key} with computed value ${computed_value}"
+      sed -i -e "s|${PREFIX}.${ini_key}|\"${computed_value}\"|g" "${tf_file}"
+    done
+
+  fi
+
+done
+
