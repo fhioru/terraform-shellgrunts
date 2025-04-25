@@ -62,10 +62,6 @@ updated, or deleted according to the latest Terraform plan in the specified work
 
 ## FAQ
 
-**Q: Why not use [Terragrunt](https://terragrunt.gruntwork.io/) which already supports this?**
-
-In a situation where you need this type of functionality (find+replace) and can add or bake in Terragrunt then using Terragrunt will likely be a much better solution until such time as the functionality is present in your preferred IAC toolset of choice
-
 **Q: Why would I want to use this?**
 
 This will allow you to generate Gitlab-CI pipeline reports for the IAC managed by TFE/TFC which can be very useful when making use of GitOps workflows to process changes
