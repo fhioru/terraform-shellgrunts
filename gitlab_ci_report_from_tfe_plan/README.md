@@ -7,7 +7,7 @@ report showing planned resource changes.
 **Usage**
 
 ```bash
-gitlab-ci-report-from-tfe-plan
+gitlab_ci_report_from_tfe_plan
 ```
 
 ## How it works
@@ -42,7 +42,7 @@ Optional Environment Variables:
 export TFE_TOKEN="your-token-here"
 export TFE_ORG="your-org"
 export WORKSPACE_NAME="your-workspace"
-./gitlab-ci-report-from-tfe-plan
+./gitlab_ci_report_from_tfe_plan
 ```
 
 The script will output a JSON report with counts of resources to be created,
