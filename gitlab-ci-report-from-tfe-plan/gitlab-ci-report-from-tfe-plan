@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# Simple utility script to support acquiring the redacted Terraform plan in
+# JSON from the latest "run" of the detected TFE workspace name
+#
+
+##############################################################################
+# Shell Behaviour
+##############################################################################
+
+# Check for unbound variables being used
+# set -o nounset
+
+# Exit is a bad command is attempted. If you're going to handle errors then
+# leave this disabled
+# set -o errexit
+
+# Exit if any of the commands in a pipeline exit with a non-zero exit code
+# set -o pipefail
+
+##############################################################################
+# Variables
+##############################################################################
+
+CONST_COMMAND_LINE="$@"
+CONST_OS_VERSION=$(uname -r)
+CONST_SYSTEM_TYPE=$(uname -m)
+CONST_SCRIPT_NAME=${0##*/}
+
+# Defining True and False to improve readability in scripts
+TRUE=0
+FALSE=1
+
+# Current logging config
+TTY_OUTPUT_ENABLED=$TRUE
+LOG_OUTPUT_ENABLED=$FALSE
+SYSLOG_OUTPUT_ENABLED=$FALSE
+export TTY_OUTPUT_ENABLED LOG_OUTPUT_ENABLED SYSLOG_OUTPUT_ENABLED
+
+# Trap  abnormal termination
+trap cleanup 1 2 3 15
+
+
+##############################################################################
+# Functions
+##############################################################################
+
+function show_usage {
+    cat <<EOF
+
+usage: $CONST_SCRIPT_NAME
+
+A utility script to fetch and analyze Terraform plan information from Terraform Enterprise (TFE).
+The script generates a GitLab-compatible report showing planned resource changes.
+
+Required Environment Variables:
+    TFE_TOKEN          Terraform Enterprise API token
+                       Example: "abcdef123456..."
+
+    TFE_ORG           Terraform Enterprise organization name
+                       Example: "my-organization"
+
+    WORKSPACE_NAME     Name of the Terraform workspace to analyze
+                       Example: "production-infrastructure"
+
+Optional Environment Variables:
+    TFE_URL           Terraform Enterprise host URL (defaults to app.terraform.io)
+                       Example: "tfe.company.com"
+
+Example Usage:
+    export TFE_TOKEN="your-token-here"
+    export TFE_ORG="your-org"
+    export WORKSPACE_NAME="your-workspace"
+    ./$CONST_SCRIPT_NAME
+
+The script will output a JSON report with counts of resources to be created,
+updated, or deleted according to the latest Terraform plan in the specified workspace.
+
+Example Output:
+    {
+      "create": 2,
+      "update": 1,
+      "delete": 0
+    }
+
+EOF
+}
+
+
+function cleanup {
+  echo "Exiting."
+  exit 1
+}
+
+
+
+# Taken from Hestio AWSH https://github.com/hest-io/awsh
+# A logging function which can be used as follows
+# _log "$LINENO" "Example test message"
+function _log {
+
+    local p_line_number="$1"
+    local p_message="$2"
+    : "${p_line_number:=0}"
+    : "${DEFAULT_OUT:=/dev/stderr}"
+
+    timestamp="$(date +'%Y-%m-%dT%H:%M:%S%z')"
+    log_file_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "$p_message")
+    log_tty_msg=$(printf "[%s]: %-s:%04d : INFO  %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "$p_message")
+
+    # Output to TTY if enabled
+    [[ $TTY_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_tty_msg}" >&2
+    # Output to the DEFAULT_OUT file if enabled
+    [[ $LOG_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_file_msg}" >> "$DEFAULT_OUT"
+    # Output to the syslog if the logger command is found
+    _dummy=$(command -v logger > /dev/null 2>&1)
+    has_syslogger=$?
+    [[ $SYSLOG_OUTPUT_ENABLED -eq $TRUE ]] && [[ "$has_syslogger" -eq $TRUE ]] && logger -t "$CONST_SCRIPT_NAME" -p user.info "${log_tty_msg}"
+
+}
+
+
+# Taken from Hestio AWSH https://github.com/hest-io/awsh
+# A logging function which can be used as follows to exit the run with a specific error message
+# _log_exit_with_error "$LINENO" "Example test message"
+function _log_exit_with_error {
+
+  # ANSI escape code for red text
+  local red='\033[0;31m'
+  # ANSI escape code to reset text color
+  local reset='\033[0m'
+
+  local p_line_number="$1"
+  local p_message="$2"
+  : "${p_line_number:=0}"
+  : "${DEFAULT_OUT:=/dev/stderr}"
+
+  timestamp="$(date +'%Y-%m-%dT%H:%M:%S%z')"
+  log_file_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "${p_message}")
+  log_tty_msg=$(printf "[%s]: %-s:%04d : %s" "$timestamp" "$CONST_SCRIPT_NAME" "$p_line_number" "${red}ERROR ${p_message}${reset}")
+
+  # Output to TTY if enabled
+  [[ $TTY_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_tty_msg}" >&2
+  # Output to the DEFAULT_OUT file if enabled
+  [[ $LOG_OUTPUT_ENABLED -eq $TRUE ]] && echo -e "${log_file_msg}" >> "$DEFAULT_OUT"
+  # Output to the syslog if the logger command is found
+  _dummy=$(command -v logger > /dev/null 2>&1)
+  has_syslogger=$?
+  [[ $SYSLOG_OUTPUT_ENABLED -eq $TRUE ]] && [[ "$has_syslogger" -eq $TRUE ]] && logger -t "$CONST_SCRIPT_NAME" -p user.info "${log_tty_msg}"
+
+  exit 1
+
+}
+
+
+function _trim {
+  awk '{$1=$1};1'
+}
+
+
+
+# Function to make API requests to Terraform Enterprise
+function make_tfe_api_request {
+    local endpoint="$1"
+    local method="${2:-GET}"
+    local data="$3"
+    local tfe_token=${TFE_TOKEN:-""}
+    local tfe_host=${TFE_URL:-"app.terraform.io"}
+
+    # Validate token
+    if [[ -z "$tfe_token" ]]; then
+        _log_exit_with_error "$LINENO" "TFE_TOKEN environment variable must be set" >&2
+    fi
+
+    # Build curl command
+    local curl_cmd="curl -s"
+    curl_cmd+=" --header \"Authorization: Bearer $tfe_token\""
+    curl_cmd+=" --header \"Content-Type: application/vnd.api+json\""
+
+    if [[ -n "$data" ]]; then
+        curl_cmd+=" -X $method"
+        curl_cmd+=" -d '$data'"
+    fi
+
+    curl_cmd+=" \"https://$tfe_host$endpoint\""
+
+    # Make API request
+    local response
+    response=$(eval "$curl_cmd")
+
+    # Check if the request was successful
+    if [[ $? -ne 0 ]]; then
+        _log_exit_with_error "$LINENO" "Failed to fetch data from Terraform Enterprise ${tfe_host}" >&2
+    fi
+
+    # Check if response contains data
+    if ! echo "$response" | grep -q '"data":'; then
+        echo "$response" >&2
+        _log_exit_with_error "$LINENO" "Invalid response from Terraform Enterprise 'https://${tfe_host}${endpoint}'" >&2
+    fi
+
+    echo "$response"
+}
+
+
+# Update get_tfe_workspace_id_from_name to use the new function
+function get_tfe_workspace_id_from_name {
+    local workspace_name="$1"
+    local tfe_org=${TFE_ORG:-"default"}
+
+    # Validate inputs
+    if [[ -z "$workspace_name" ]]; then
+        _log_exit_with_error "$LINENO" "Workspace Name is required" >&2
+    fi
+
+    local response
+    response=$(make_tfe_api_request "/api/v2/organizations/${tfe_org}/workspaces/${workspace_name}")
+
+    # Extract and return the workspace-id information
+    echo "$response" | jq -r '.data.id // empty'
+}
+
+
+# Update get_latest_tfe_run to use the new function
+function get_latest_tfe_run {
+    local workspace_id="$1"
+
+    # Validate inputs
+    if [[ -z "$workspace_id" ]]; then
+        _log_exit_with_error "$LINENO" "Workspace ID is required" >&2
+    fi
+
+    local data='{
+        "fields": {
+          "run": [
+            "id", "workspace", "avatar_url", "username", "message",
+            "source", "configuration_version", "status", "is_destroy",
+            "refresh_only", "save_plan", "created_at", "status_timestamps",
+            "created_by", "plan_only", "allow_empty_apply", "trigger_reason"
+          ]
+        },
+        "filter": {
+          "status": "planned_and_finished",
+          "source": "",
+          "operation": "plan_only"
+        },
+        "include": [
+          "created_by",
+          "configuration_version",
+          "configuration_version.ingress_attributes"
+        ],
+        "page": {
+          "number": 1,
+          "size": 5
+        },
+        "workspace_id": "'$workspace_id'"
+    }'
+
+    local response
+    response=$(make_tfe_api_request "/api/v2/workspaces/$workspace_id/runs" "GET" "$data")
+
+    # Extract and return the latest run information
+    echo "$response" | jq -r '.data[0].id // empty'
+}
+
+
+# Update get_plan_from_tfe_run to use the new function
+function get_plan_from_tfe_run {
+    local run_id="$1"
+
+    # Validate inputs
+    if [[ -z "$run_id" ]]; then
+        _log_exit_with_error "$LINENO" "Run ID is required" >&2
+    fi
+
+    local response
+    response=$(make_tfe_api_request "/api/v2/runs/$run_id")
+
+    # Extract and return the latest run information
+    echo "$response" | jq -r '.data.relationships.plan.data.id // empty'
+}
+
+
+# Update get_jsonplan_from_tfe_plan to use the new function
+function get_jsonplan_from_tfe_plan {
+    local plan_id="$1"
+
+    # Validate inputs
+    if [[ -z "$plan_id" ]]; then
+        _log_exit_with_error "$LINENO" "Plan ID is required" >&2
+    fi
+
+    local response
+    response=$(make_tfe_api_request "/api/v2/plans/$plan_id/json-output-redacted")
+
+    # Extract and return the latest run information
+    echo "$response" | jq -r '. // empty'
+}
+
+
+# Parent function to make use of utility functions above
+function get_latest_jsonplan_from_tfe_workspace {
+    local workspace_name=${WORKSPACE_NAME:-""}
+
+    # Validate inputs
+    if [[ -z "$workspace_name" ]]; then
+        _log_exit_with_error "$LINENO" "Workspace name is required. Make sure WORKSPACE_NAME is set" >&2
+    fi
+
+    local workspace_id=$(get_tfe_workspace_id_from_name "${workspace_name}")
+    local latest_workspace_run_id=$(get_latest_tfe_run "${workspace_id}")
+    local linked_plan_id=$(get_plan_from_tfe_run "${latest_workspace_run_id}")
+
+    echo "$(get_jsonplan_from_tfe_plan "${linked_plan_id}")"
+}
+
+
+# All-in-One wrapper function to transform the TFS JSON plan into a
+# report compatible with GitLab CI report artifacts
+function generate_gitlab_report_from_tfplan {
+    local workspace_name=${WORKSPACE_NAME:-""}
+
+    # Validate inputs
+    if [[ -z "$workspace_name" ]]; then
+        _log_exit_with_error "$LINENO" "Workspace name is required. Make sure WORKSPACE_NAME is set" >&2
+    fi
+
+    local workspace_id=$(get_tfe_workspace_id_from_name "${workspace_name}")
+    local latest_workspace_run_id=$(get_latest_tfe_run "${workspace_id}")
+    local linked_plan_id=$(get_plan_from_tfe_run "${latest_workspace_run_id}")
+
+    echo "$(get_jsonplan_from_tfe_plan "${linked_plan_id}")" \
+      | jq -r '( [.resource_changes[]?.change.actions?] | flatten )
+                | {
+                  "create":(map(select(.=="create")) | length),
+                  "update":(map(select(.=="update")) | length),
+                  "delete":(map(select(.=="delete")) | length)
+                }'
+}
+
+
+
+
+##############################################################################
+# Main loop
+##############################################################################
+
+
+# show help for no arguments if stdin is a terminal
+if [ "$1" == '-h' ] || [ "$1" == '--help' ] || [ "$1" == 'help' ]; then
+    show_usage
+    exit 0
+fi
+
+generate_gitlab_report_from_tfplan
