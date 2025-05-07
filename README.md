@@ -19,13 +19,13 @@ stages such as encryption configuration added in OpenTofu 1.8+
 
 ## Integrations
 
-### Shellgrunt: sg_gitlab_tfreport_from_tfe
+### Shellgrunt: sg_tfe_gitlab_ci_helper
 
 **Does what?:** This Shellgrunt attempts to fetch and analyze Terraform plan information from Terraform
-Enterprise (TFE) or Terraform Cloud (TFC). The script generates a GitLab-CI compatible report showing
+Enterprise (TFE) or Terraform Cloud (TFC). The script generates a GitLab-CI compatible outputs showing
 planned resource changes.
 
-[Read the docs](docs/sg_gitlab_tfreport_from_tfe.md)
+[Read the docs](docs/sg_tfe_gitlab_ci_helper.md)
 
 
 ## Contributing

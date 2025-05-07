@@ -7,7 +7,7 @@ report showing planned resource changes.
 **Usage**
 
 ```bash
-sg_gitlab_tfreport_from_tfe
+sg_tfe_gitlab_ci_helper
 ```
 
 ## How it works
@@ -42,7 +42,7 @@ Optional Environment Variables:
 export TFE_TOKEN="your-token-here"
 export TFE_ORG="your-org"
 export WORKSPACE_NAME="your-workspace"
-./sg_gitlab_tfreport_from_tfe
+./sg_tfe_gitlab_ci_helper
 ```
 
 The script will output a JSON report with counts of resources to be created,
