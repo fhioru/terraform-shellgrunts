@@ -153,6 +153,18 @@ function _log_exit_with_error {
 }
 
 
+function check_deps {
+
+  DEPS=("awk" "jq" "curl" "terraform-j2md")
+  for next in "${DEPS[@]}"; do
+    _dummy=$(command -v "${next}" > /dev/null 2>&1)
+    has_dep=$?
+    [[ "$has_dep" -eq $TRUE ]] || _log_exit_with_error "$LINENO" "Required dependency [${next}] not found in PATH"
+  done
+
+}
+
+
 function _trim {
   awk '{$1=$1};1'
 }
@@ -160,7 +172,7 @@ function _trim {
 
 
 # Function to make API requests to Terraform Enterprise
-function make_tfe_api_request {
+function tfe_make_api_request {
     local endpoint="$1"
     local method="${2:-GET}"
     local data="$3"
@@ -203,8 +215,51 @@ function make_tfe_api_request {
 }
 
 
-# Update get_tfe_workspace_id_from_name to use the new function
-function get_tfe_workspace_id_from_name {
+# Function to make simple authenticated HTTP requests to Terraform Enterprise
+function tfe_make_http_request {
+    local url="$1"
+    local method="${2:-GET}"
+    local data="$3"
+    local tfe_token=${TFE_TOKEN:-""}
+
+    # Validate token
+    if [[ -z "$tfe_token" ]]; then
+        _log_exit_with_error "$LINENO" "TFE_TOKEN environment variable must be set" >&2
+    fi
+
+    # Build curl command
+    local curl_cmd="curl -s"
+    curl_cmd+=" --header \"Authorization: Bearer $tfe_token\""
+    curl_cmd+=" --header \"Content-Type: application/vnd.api+json\""
+
+    if [[ -n "$data" ]]; then
+        curl_cmd+=" -X $method"
+        curl_cmd+=" -d '$data'"
+    fi
+
+    curl_cmd+=" \"${url}\""
+
+    # Make API request
+    local response
+    response=$(eval "$curl_cmd")
+
+    # Check if the request was successful
+    if [[ $? -ne 0 ]]; then
+        _log_exit_with_error "$LINENO" "Failed to fetch URL from Terraform Enterprise ${url}" >&2
+    fi
+
+    # Check if response contains data
+    if ! echo "$response" | grep -q '"data":'; then
+        echo "$response" >&2
+        _log_exit_with_error "$LINENO" "Invalid response from Terraform Enterprise '${url}'" >&2
+    fi
+
+    echo "$response"
+}
+
+
+# Update tfe_get_workspace_id_from_name to use the new function
+function tfe_get_workspace_id_from_name {
     local workspace_name="$1"
     local tfe_org=${TFE_ORG:-"default"}
 
@@ -214,15 +269,15 @@ function get_tfe_workspace_id_from_name {
     fi
 
     local response
-    response=$(make_tfe_api_request "/api/v2/organizations/${tfe_org}/workspaces/${workspace_name}")
+    response=$(tfe_make_api_request "/api/v2/organizations/${tfe_org}/workspaces/${workspace_name}")
 
     # Extract and return the workspace-id information
     echo "$response" | jq -r '.data.id // empty'
 }
 
 
-# Update get_latest_tfe_run to use the new function
-function get_latest_tfe_run {
+# Update tfe_get_latest_run to use the new function
+function tfe_get_latest_run {
     local workspace_id="$1"
 
     # Validate inputs
@@ -257,15 +312,15 @@ function get_latest_tfe_run {
     }'
 
     local response
-    response=$(make_tfe_api_request "/api/v2/workspaces/$workspace_id/runs" "GET" "$data")
+    response=$(tfe_make_api_request "/api/v2/workspaces/$workspace_id/runs" "GET" "$data")
 
     # Extract and return the latest run information
     echo "$response" | jq -r '.data[0].id // empty'
 }
 
 
-# Update get_plan_from_tfe_run to use the new function
-function get_plan_from_tfe_run {
+# Update tfe_get_plan_from_run to use the new function
+function tfe_get_plan_from_run {
     local run_id="$1"
 
     # Validate inputs
@@ -274,15 +329,15 @@ function get_plan_from_tfe_run {
     fi
 
     local response
-    response=$(make_tfe_api_request "/api/v2/runs/$run_id")
+    response=$(tfe_make_api_request "/api/v2/runs/$run_id")
 
     # Extract and return the latest run information
     echo "$response" | jq -r '.data.relationships.plan.data.id // empty'
 }
 
 
-# Update get_jsonplan_from_tfe_plan to use the new function
-function get_jsonplan_from_tfe_plan {
+# Update tfe_get_jsonplan_from_plan to use the new function
+function tfe_get_jsonplan_from_plan {
     local plan_id="$1"
 
     # Validate inputs
@@ -291,7 +346,7 @@ function get_jsonplan_from_tfe_plan {
     fi
 
     local response
-    response=$(make_tfe_api_request "/api/v2/plans/$plan_id/json-output-redacted")
+    response=$(tfe_make_api_request "/api/v2/plans/$plan_id/json-output-redacted")
 
     # Extract and return the latest run information
     echo "$response" | jq -r '. // empty'
@@ -299,7 +354,7 @@ function get_jsonplan_from_tfe_plan {
 
 
 # Parent function to make use of utility functions above
-function get_latest_jsonplan_from_tfe_workspace {
+function tfe_get_latest_jsonplan_from_workspace {
     local workspace_name=${WORKSPACE_NAME:-""}
 
     # Validate inputs
@@ -307,17 +362,33 @@ function get_latest_jsonplan_from_tfe_workspace {
         _log_exit_with_error "$LINENO" "Workspace name is required. Make sure WORKSPACE_NAME is set" >&2
     fi
 
-    local workspace_id=$(get_tfe_workspace_id_from_name "${workspace_name}")
-    local latest_workspace_run_id=$(get_latest_tfe_run "${workspace_id}")
-    local linked_plan_id=$(get_plan_from_tfe_run "${latest_workspace_run_id}")
+    local workspace_id=$(tfe_get_workspace_id_from_name "${workspace_name}")
+    local latest_workspace_run_id=$(tfe_get_latest_run "${workspace_id}")
+    local linked_plan_id=$(tfe_get_plan_from_run "${latest_workspace_run_id}")
 
-    echo "$(get_jsonplan_from_tfe_plan "${linked_plan_id}")"
+    echo "$(tfe_get_jsonplan_from_plan "${linked_plan_id}")"
 }
 
 
-# All-in-One wrapper function to transform the TFS JSON plan into a
-# report compatible with GitLab CI report artifacts
-function generate_gitlab_report_from_tfplan {
+# Get the URL for the plan logfile
+function tfe_get_planlog_url_from_plan {
+    local plan_id="$1"
+
+    # Validate inputs
+    if [[ -z "$plan_id" ]]; then
+        _log_exit_with_error "$LINENO" "Plan ID is required" >&2
+    fi
+
+    local response
+    response=$(tfe_make_api_request "/api/v2/plans/$plan_id")
+
+    # Extract and return the latest run information
+    echo "$response" | jq -r '.data.attributes."log-read-url" // empty'
+}
+
+
+# Standalone function to wrap all of the steps for TF plan logfile acquisition
+function tfe_get_latest_planlog_for_workspace {
     local workspace_name=${WORKSPACE_NAME:-""}
 
     # Validate inputs
@@ -325,12 +396,39 @@ function generate_gitlab_report_from_tfplan {
         _log_exit_with_error "$LINENO" "Workspace name is required. Make sure WORKSPACE_NAME is set" >&2
     fi
 
-    local workspace_id=$(get_tfe_workspace_id_from_name "${workspace_name}")
-    local latest_workspace_run_id=$(get_latest_tfe_run "${workspace_id}")
-    local linked_plan_id=$(get_plan_from_tfe_run "${latest_workspace_run_id}")
+    local workspace_id=$(tfe_get_workspace_id_from_name "${workspace_name}")
+    local latest_workspace_run_id=$(tfe_get_latest_run "${workspace_id}")
+    local linked_plan_id=$(tfe_get_plan_from_run "${latest_workspace_run_id}")
+    local linked_plan_log_url=$(tfe_get_planlog_url_from_plan "${linked_plan_id}")
 
-    echo "$(get_jsonplan_from_tfe_plan "${linked_plan_id}")" \
-      | jq -r '( [.resource_changes[]?.change.actions?] | flatten )
+    local response
+    response=$(tfe_make_http_request "${linked_plan_log_url}")
+
+    # Extract and return the latest run information
+    echo "$response"
+}
+
+
+# Standalone function to wrap all of the steps for TF plan acquisition
+function tfe_get_latest_planjson_for_workspace {
+    local workspace_name=${WORKSPACE_NAME:-""}
+
+    # Validate inputs
+    if [[ -z "$workspace_name" ]]; then
+        _log_exit_with_error "$LINENO" "Workspace name is required. Make sure WORKSPACE_NAME is set" >&2
+    fi
+
+    local workspace_id=$(tfe_get_workspace_id_from_name "${workspace_name}")
+    local latest_workspace_run_id=$(tfe_get_latest_run "${workspace_id}")
+    local linked_plan_id=$(tfe_get_plan_from_run "${latest_workspace_run_id}")
+
+    echo "$(tfe_get_jsonplan_from_plan "${linked_plan_id}")"
+}
+
+
+# Function as a filter and transformer
+function convert_planjson_to_gitlab_report {
+    jq -r '( [.resource_changes[]?.change.actions?] | flatten )
                 | {
                   "create":(map(select(.=="create")) | length),
                   "update":(map(select(.=="update")) | length),
@@ -339,17 +437,63 @@ function generate_gitlab_report_from_tfplan {
 }
 
 
-
-
 ##############################################################################
 # Main loop
 ##############################################################################
 
 
-# show help for no arguments if stdin is a terminal
-if [ "$1" == '-h' ] || [ "$1" == '--help' ] || [ "$1" == 'help' ]; then
-    show_usage
-    exit 0
-fi
+function sg_main {
 
-generate_gitlab_report_from_tfplan
+    check_deps
+
+    # Show most common commands if no args are given
+    if { [ -z "$1" ] && [ -t 0 ] ; }; then
+        show_usage
+        return 0
+    fi
+
+    # show help for no arguments if stdin is a terminal
+    if [ "$1" == '-h' ] || [ "$1" == '--help' ] || [ "$1" == 'help' ]; then
+        show_usage
+        return 0
+    fi
+
+
+    # Pop the first arg as a potential command and attempt to process
+    _sub_command=$1
+    shift
+
+    case ${_sub_command} in
+
+        get_latest_planlog)
+            output_file="${1:-/dev/stdout}"
+            tfe_get_latest_planlog_for_workspace > "${output_file}"
+        ;;
+
+        get_latest_planjson)
+            output_file="${1:-/dev/stdout}"
+            tfe_get_latest_planjson_for_workspace > "${output_file}"
+        ;;
+
+        generate_terraform_gitlab_report)
+            output_file="${1:-/dev/stdout}"
+            tfe_get_latest_planjson_for_workspace  | convert_planjson_to_gitlab_report > "${output_file}"
+        ;;
+
+        generate_terraform_diff_report)
+            output_file="${1:-/dev/stdout}"
+            tfe_get_latest_planjson_for_workspace  | terraform-j2md > "${output_file}"
+        ;;
+
+        *)
+
+          _log_exit_with_error "$LINENO" "'${_sub_command}' is not a valid command. See '${CONST_SCRIPT_NAME} --help' for more info."  >&2
+          return 1
+
+        ;;
+
+    esac
+
+}
+
+sg_main "${@}"

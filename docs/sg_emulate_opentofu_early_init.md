@@ -16,7 +16,7 @@ the Docker container, agent or CICD available.
 **Usage**
 
 ```bash
-shellgrunt <manifest.ini> <env-id> [<path>]
+sg_emulate_opentofu_early_init <manifest.ini> <env-id> [<path>]
 ```
 
 ## How it works
